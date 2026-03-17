@@ -84,10 +84,6 @@ def simulate(draft_position: int = 4, num_teams: int = 10, num_rounds: int = 23,
                 display = format_my_turn_display(top, my_roster, round_num,
                                                  pick_num, total_picks, MY_TEAM)
                 print(display)
-                advice = get_claude_pick_advice(top, my_roster, round_num, MY_TEAM)
-                if advice and not advice.startswith('['):
-                    print(f"\n  AI: {advice}")
-                print()
 
             chosen = top[0]
             key = mark_drafted(player_pool, chosen['name'], MY_TEAM, pick_num, round_num)
@@ -97,6 +93,13 @@ def simulate(draft_position: int = 4, num_teams: int = 10, num_rounds: int = 23,
 
             pick_label = f"[R{round_num:02d} P{pick_num:03d}] ← YOU"
             print(f"  {pick_label}  {chosen['name']:<25}  ({'/'.join(chosen['positions'][:2])})")
+
+            if not quiet:
+                # Claude commentary comes AFTER the pick — analyzing the actual pick made
+                advice = get_claude_pick_advice(top, my_roster, round_num, MY_TEAM, chosen=chosen)
+                if advice and not advice.startswith('['):
+                    print(f"  AI analysis: {advice}")
+                print()
 
         # ── Other teams: pick near ADP with slight randomness ─────────────────
         else:
@@ -132,6 +135,8 @@ def simulate(draft_position: int = 4, num_teams: int = 10, num_rounds: int = 23,
         stats = []
         if p.get('proj_avg'):  stats.append(f".{int(p['proj_avg']*1000):03d} AVG")
         if p.get('proj_hr'):   stats.append(f"{p['proj_hr']} HR")
+        xbh = p.get('proj_xbh') or int((p.get('proj_hr', 0) or 0) * 1.6)
+        if xbh:                stats.append(f"{xbh} XBH")
         if p.get('proj_rbi'):  stats.append(f"{p['proj_rbi']} RBI")
         if p.get('proj_r'):    stats.append(f"{p['proj_r']} R")
         if p.get('proj_sb'):   stats.append(f"{p['proj_sb']} SB")
@@ -146,49 +151,60 @@ def simulate(draft_position: int = 4, num_teams: int = 10, num_rounds: int = 23,
         if p.get('proj_whip'):  stats.append(f"{p['proj_whip']:.2f} WHIP")
         if p.get('proj_k'):     stats.append(f"{p['proj_k']} K")
         if p.get('proj_w'):     stats.append(f"{p['proj_w']} W")
-        if p.get('proj_sv'):    stats.append(f"{p['proj_sv']} SV")
+        if p.get('proj_qs'):    stats.append(f"{p['proj_qs']} QS")
+        proj_svhd = (p.get('proj_sv', 0) or 0) + (p.get('proj_holds', 0) or 0)
+        if proj_svhd:           stats.append(f"{proj_svhd} SVHD")
         print(f"    R{rnd:>2}  {p['name']:<25} {pos:<8}  {', '.join(stats)}")
 
     # ── Projected category totals ──────────────────────────────────────────────
     print(f"\n{'─'*60}")
-    print("  PROJECTED CATEGORY TOTALS (based on 2025 stats)")
+    print("  PROJECTED CATEGORY TOTALS (raw 2025 actuals — individual")
+    print("  player lines may look high; ranking engine uses regressed values)")
     print(f"{'─'*60}")
 
     tot_hr  = sum(p.get('proj_hr', 0)  or 0 for p in hitters)
     tot_rbi = sum(p.get('proj_rbi', 0) or 0 for p in hitters)
     tot_r   = sum(p.get('proj_r', 0)   or 0 for p in hitters)
     tot_sb  = sum(p.get('proj_sb', 0)  or 0 for p in hitters)
+    tot_xbh = sum((p.get('proj_xbh') or int((p.get('proj_hr', 0) or 0) * 1.6))
+                  for p in hitters)
     avg_vals = [p.get('proj_avg', 0) or 0 for p in hitters if p.get('proj_avg')]
     avg_team = sum(avg_vals) / len(avg_vals) if avg_vals else 0
 
-    tot_k   = sum(p.get('proj_k', 0)  or 0 for p in pitchers)
-    tot_w   = sum(p.get('proj_w', 0)  or 0 for p in pitchers)
-    tot_sv  = sum(p.get('proj_sv', 0) or 0 for p in pitchers)
+    tot_k    = sum(p.get('proj_k', 0)  or 0 for p in pitchers)
+    tot_w    = sum(p.get('proj_w', 0)  or 0 for p in pitchers)
+    tot_qs   = sum(p.get('proj_qs', 0) or 0 for p in pitchers)
+    tot_svhd = sum((p.get('proj_sv', 0) or 0) + (p.get('proj_holds', 0) or 0)
+                   for p in pitchers)
     era_vals  = [p.get('proj_era', 0)  or 0 for p in pitchers if p.get('proj_era')]
     whip_vals = [p.get('proj_whip', 0) or 0 for p in pitchers if p.get('proj_whip')]
     era_team  = sum(era_vals)  / len(era_vals)  if era_vals  else 0
     whip_team = sum(whip_vals) / len(whip_vals) if whip_vals else 0
 
     print(f"  HITTING   AVG: .{int(avg_team*1000):03d}   R: {tot_r}   HR: {tot_hr}   "
-          f"RBI: {tot_rbi}   SB: {tot_sb}")
+          f"XBH: {tot_xbh}   RBI: {tot_rbi}   SB: {tot_sb}")
     print(f"  PITCHING  ERA: {era_team:.2f}   WHIP: {whip_team:.2f}   "
-          f"K: {tot_k}   W: {tot_w}   SV: {tot_sv}")
+          f"K: {tot_k}   W: {tot_w}   QS: {tot_qs}   SVHD: {tot_svhd}")
 
     # ── Quick strength/weakness grade ─────────────────────────────────────────
     print(f"\n{'─'*60}")
     print("  CATEGORY GRADES  (rough benchmarks for competitive H2H team)")
     print(f"{'─'*60}")
     grades = [
+        # Batting categories (actual league scoring)
         ("AVG",  avg_team,  .265, .275, "higher"),
         ("R",    tot_r,     700,  800,  "higher"),
         ("HR",   tot_hr,    180,  220,  "higher"),
+        ("XBH",  tot_xbh,   420,  520,  "higher"),  # 12 hitters × ~40 XBH avg = 480 solid
         ("RBI",  tot_rbi,   600,  720,  "higher"),
         ("SB",   tot_sb,    80,   130,  "higher"),
+        # Pitching categories (actual league scoring)
         ("ERA",  era_team,  3.80, 3.40, "lower"),
         ("WHIP", whip_team, 1.25, 1.15, "lower"),
         ("K",    tot_k,     1200, 1500, "higher"),
         ("W",    tot_w,     65,   85,   "higher"),
-        ("SV",   tot_sv,    40,   60,   "higher"),
+        ("QS",   tot_qs,    70,   90,   "higher"),  # 7 SPs × ~13 QS avg = 91 solid
+        ("SVHD", tot_svhd,  60,   80,   "higher"),  # saves + holds combined
     ]
     for cat, val, ok_thresh, good_thresh, direction in grades:
         if direction == "higher":

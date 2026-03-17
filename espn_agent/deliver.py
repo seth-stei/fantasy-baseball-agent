@@ -21,6 +21,8 @@ def format_digest(
     lineup_analysis: str,
     trade_analysis: str = '',
     waiver_analysis: str = '',
+    roster_moves: str = '',
+    il_alerts: str = '',
     matchup_score: str = '',
 ) -> str:
     """Build the full daily digest text."""
@@ -33,23 +35,39 @@ def format_digest(
     ]
 
     if matchup_score:
-        lines += ['', f'📊 MATCHUP: {matchup_score}', '']
+        lines += ['', f'MATCHUP: {matchup_score}', '']
+
+    if il_alerts:
+        lines += [
+            '',
+            'IL ACTION NEEDED',
+            '-'*40,
+            il_alerts,
+        ]
 
     lines += [
         '',
-        '📋 TODAY\'S LINEUP',
+        "TODAY'S LINEUP",
         '-'*40,
         lineup_text,
         '',
-        '🤖 AI ANALYSIS',
+        'AI ANALYSIS',
         '-'*40,
         lineup_analysis,
     ]
 
+    if roster_moves:
+        lines += [
+            '',
+            'ROSTER MOVES (EXECUTED TODAY)',
+            '-'*40,
+            roster_moves,
+        ]
+
     if trade_analysis:
         lines += [
             '',
-            '🔄 TRADE OPPORTUNITIES',
+            'TRADE OPPORTUNITIES',
             '-'*40,
             trade_analysis,
         ]
@@ -57,7 +75,7 @@ def format_digest(
     if waiver_analysis:
         lines += [
             '',
-            '📥 WAIVER WIRE',
+            'WAIVER WIRE (ADVISORY)',
             '-'*40,
             waiver_analysis,
         ]
@@ -113,6 +131,8 @@ def deliver(
     lineup_analysis: str,
     trade_analysis: str = '',
     waiver_analysis: str = '',
+    roster_moves: str = '',
+    il_alerts: str = '',
     matchup_score: str = '',
     send_email: bool = True,
 ):
@@ -123,6 +143,8 @@ def deliver(
         lineup_analysis=lineup_analysis,
         trade_analysis=trade_analysis,
         waiver_analysis=waiver_analysis,
+        roster_moves=roster_moves,
+        il_alerts=il_alerts,
         matchup_score=matchup_score,
     )
 

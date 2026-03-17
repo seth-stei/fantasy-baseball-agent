@@ -148,7 +148,8 @@ def run_mock_draft(player_pool: dict, draft_position: int,
 
             if top:
                 advice = get_claude_pick_advice(top, mock_my_roster, round_num, MY_TEAM_NAME)
-                print(f"\n  AI: {advice}\n")
+                if advice and not advice.startswith('['):
+                    print(f"\n  AI recommendation: {advice}\n")
 
             raw = input("[Mock] Type player name to draft (or Enter for top pick): ").strip()
             if not raw and top:
@@ -282,10 +283,10 @@ def run_draft(tracker: DraftTracker, player_pool: dict,
                                              pick_num, total_picks, MY_TEAM_NAME)
             print(display)
 
-            # Claude AI recommendation
+            # Claude AI recommendation (pre-pick — advises before you click on ESPN)
             advice = get_claude_pick_advice(top, my_roster, round_num, MY_TEAM_NAME)
             if advice and not advice.startswith('['):
-                print(f"\n  AI: {advice}")
+                print(f"\n  AI recommendation: {advice}")
 
             # Wait for user to confirm pick
             print()

@@ -11,17 +11,20 @@ from typing import Dict, List, Optional, Set
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 
-def get_todays_schedule() -> Dict:
+def get_todays_schedule():
     """
-    Fetch today's MLB schedule.
-    Returns dict mapping team ID -> {opponent, home_away, game_time, game_pk}
+    Fetch today's MLB schedule and confirmed starting pitchers.
+
+    Returns:
+        teams_playing: dict  {team_id -> {opponent, home_away, game_time, game_pk}}
+        confirmed_starters: set  lowercase player names confirmed as today's SP starters
     """
     today = date.today().strftime('%Y-%m-%d')
     url = f"{MLB_API_BASE}/schedule"
     params = {
         'sportId': 1,
         'date': today,
-        'hydrate': 'team,lineups'
+        'hydrate': 'team,lineups,probablePitcher',
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
@@ -29,9 +32,11 @@ def get_todays_schedule() -> Dict:
         data = resp.json()
     except Exception as e:
         print(f"  Warning: could not fetch MLB schedule: {e}")
-        return {}
+        return {}, set()
 
-    teams_playing = {}
+    teams_playing: Dict = {}
+    confirmed_starters: Set[str] = set()
+
     for date_entry in data.get('dates', []):
         for game in date_entry.get('games', []):
             status = game.get('status', {}).get('abstractGameState', '')
@@ -57,7 +62,16 @@ def get_todays_schedule() -> Dict:
                     'game_time': game_time,
                     'game_pk': game_pk,
                 }
-    return teams_playing
+
+                # Extract confirmed starting pitchers for both teams
+                for side in ('home', 'away'):
+                    probable = game['teams'][side].get('probablePitcher', {})
+                    if probable:
+                        name = probable.get('fullName', '').strip().lower()
+                        if name:
+                            confirmed_starters.add(name)
+
+    return teams_playing, confirmed_starters
 
 
 def get_mlb_team_map() -> Dict[str, int]:
@@ -98,7 +112,7 @@ def get_injury_report() -> Dict[str, str]:
 def get_recent_hitting_stats(days: int = 14) -> Dict[str, Dict]:
     """
     Fetch recent hitting stats from MLB API for all players.
-    Returns dict: player_name -> {avg, hr, rbi, sb, r, ops, games}
+    Returns dict: player_name -> {avg, hr, rbi, sb, r, xbh, games}
     """
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
@@ -111,7 +125,7 @@ def get_recent_hitting_stats(days: int = 14) -> Dict[str, Dict]:
         'endDate': end_date.strftime('%Y-%m-%d'),
         'sportId': 1,
         'limit': 500,
-        'sortStat': 'ops'
+        'sortStat': 'avg'
     }
     try:
         resp = requests.get(url, params=params, timeout=15)
@@ -133,7 +147,7 @@ def get_recent_hitting_stats(days: int = 14) -> Dict[str, Dict]:
                 'rbi': int(stat.get('rbi', 0) or 0),
                 'sb': int(stat.get('stolenBases', 0) or 0),
                 'r': int(stat.get('runs', 0) or 0),
-                'ops': float(stat.get('ops', 0) or 0),
+                'xbh': int(stat.get('extraBaseHits', 0) or 0),
                 'games': int(stat.get('gamesPlayed', 0) or 0),
             }
     return stats_map
@@ -142,7 +156,7 @@ def get_recent_hitting_stats(days: int = 14) -> Dict[str, Dict]:
 def get_recent_pitching_stats(days: int = 14) -> Dict[str, Dict]:
     """
     Fetch recent pitching stats from MLB API.
-    Returns dict: player_name -> {era, whip, k, wins, saves, ip}
+    Returns dict: player_name -> {era, whip, k, wins, qs, svhd, ip}
     """
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
@@ -172,12 +186,15 @@ def get_recent_pitching_stats(days: int = 14) -> Dict[str, Dict]:
         name = player.get('fullName', '')
         if name:
             ip = float(stat.get('inningsPitched', 0) or 0)
+            saves = int(stat.get('saves', 0) or 0)
+            holds = int(stat.get('holds', 0) or 0)
             stats_map[name.lower()] = {
                 'era': float(stat.get('era', 99) or 99),
                 'whip': float(stat.get('whip', 99) or 99),
                 'k': int(stat.get('strikeOuts', 0) or 0),
                 'wins': int(stat.get('wins', 0) or 0),
-                'saves': int(stat.get('saves', 0) or 0),
+                'qs': int(stat.get('qualityStarts', 0) or 0),
+                'svhd': saves + holds,
                 'ip': ip,
             }
     return stats_map

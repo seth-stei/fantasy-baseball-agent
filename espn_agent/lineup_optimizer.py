@@ -8,27 +8,36 @@ from typing import List, Dict, Tuple, Optional
 
 
 # ESPN position slot names -> eligible player positions
+# Configured for Sandy Koufax's league:
+#   Hitters: C, 1B, 2B, 3B, SS, 3×OF, UTIL, 5 Bench, 3 IL
+#   Pitchers: 7×P (no SP/RP distinction)
 LINEUP_SLOTS = {
-    'C': ['C'],
-    '1B': ['1B'],
-    '2B': ['2B'],
-    '3B': ['3B'],
-    'SS': ['SS'],
-    'OF': ['LF', 'CF', 'RF', 'OF'],
+    'C':    ['C'],
+    '1B':   ['1B'],
+    '2B':   ['2B'],
+    '3B':   ['3B'],
+    'SS':   ['SS'],
+    'OF':   ['LF', 'CF', 'RF', 'OF'],
+    'OF2':  ['LF', 'CF', 'RF', 'OF'],
+    'OF3':  ['LF', 'CF', 'RF', 'OF'],
     'UTIL': ['1B', '2B', '3B', 'SS', 'C', 'LF', 'CF', 'RF', 'OF', 'DH'],
-    'SP': ['SP'],
-    'RP': ['RP'],
-    'P': ['SP', 'RP'],
+    'P':    ['SP', 'RP'],   # all 7 pitcher slots accept either SP or RP
+    'P2':   ['SP', 'RP'],
+    'P3':   ['SP', 'RP'],
+    'P4':   ['SP', 'RP'],
+    'P5':   ['SP', 'RP'],
+    'P6':   ['SP', 'RP'],
+    'P7':   ['SP', 'RP'],
 }
 
 # Injury statuses that mean "don't start"
 INACTIVE_STATUSES = {'OUT', 'INJURY_RESERVE', 'DAY_TO_DAY', 'FIFTEEN_DAY_DL',
                      'SIXTY_DAY_DL', 'SUSPENDED', 'NA', 'INJURY_RESERVE'}
 
-# Hitting categories we care about (H2H)
-HIT_CATS = ['avg', 'r', 'hr', 'rbi', 'sb', 'ops']
-# Pitching categories
-PIT_CATS = ['era', 'whip', 'k', 'wins', 'saves']
+# Hitting categories (H2H): R, HR, XBH, RBI, SB, AVG
+HIT_CATS = ['avg', 'r', 'hr', 'rbi', 'sb', 'xbh']
+# Pitching categories (H2H): K, QS, W, ERA, WHIP, SVHD  (no CG)
+PIT_CATS = ['era', 'whip', 'k', 'wins', 'qs', 'svhd']
 
 
 def is_player_available(player) -> bool:
@@ -84,59 +93,73 @@ def score_hitter(player, recent_stats: Dict) -> float:
             rbi = float(proj.get('RBI', 0) or 0)
             sb = float(proj.get('SB', 0) or 0)
             r = float(proj.get('R', 0) or 0)
-            # Composite score (normalized weights)
-            return (avg * 50) + (hr * 3) + (rbi * 2) + (sb * 3) + (r * 1.5)
+            # XBH proxy from projected HR (HR are a subset of XBH; multiply by 1.6 for doubles/triples)
+            xbh_est = hr * 1.6
+            return (avg * 50) + (xbh_est * 2.5) + (hr * 3) + (rbi * 2) + (sb * 3) + (r * 1.5)
         except Exception:
             return 0.0
 
-    # Weight recent performance
+    # Weight recent performance against actual league categories
     avg = stats.get('avg', 0)
     hr = stats.get('hr', 0)
     rbi = stats.get('rbi', 0)
     sb = stats.get('sb', 0)
     r = stats.get('r', 0)
-    ops = stats.get('ops', 0)
+    xbh = stats.get('xbh', 0)
 
-    return (avg * 50) + (ops * 20) + (hr * 3) + (rbi * 2) + (sb * 3) + (r * 1.5)
+    return (avg * 50) + (xbh * 4) + (hr * 3) + (rbi * 2) + (sb * 3) + (r * 1.5)
 
 
-def score_pitcher(player, recent_stats: Dict, has_game_today: bool) -> float:
+def score_pitcher(player, recent_stats: Dict, has_game_today: bool,
+                  is_confirmed_starter: bool = False) -> float:
     """
     Score a pitcher for start/sit decisions.
-    SPs only get credit if they're starting today.
+
+    is_confirmed_starter: True if this SP is confirmed via MLB API as today's probable starter.
+    - Confirmed SP starter → full quality score
+    - SP with game today but NOT confirmed → small holdover score (might relieve)
+    - SP with no game → 0
+    - RP scoring is unchanged (relievers don't get a per-day "confirmed" flag)
     """
     name_lower = player.name.lower()
     stats = recent_stats.get(name_lower, {})
     position = getattr(player, 'position', '')
 
-    # Relievers: score on K rate, ERA, saves potential
+    # Relievers: score on K rate, ERA, saves+holds (SVHD) — game availability only
     if 'RP' in str(position):
         if not stats:
             return 3.0 if has_game_today else 0.0
         k = stats.get('k', 0)
         era = stats.get('era', 4.5)
-        saves = stats.get('saves', 0)
-        score = (k * 0.5) + (saves * 3) + max(0, 5 - era)
+        svhd = stats.get('svhd', 0)
+        score = (k * 0.5) + (svhd * 2.5) + max(0, 5 - era)
         return score if has_game_today else 0.0
 
-    # Starters: only start if they're pitching today (hard to know without lineup info)
-    # Use recent ERA/WHIP as quality indicator
+    # Starting pitchers: require confirmed start for full score
+    if not has_game_today:
+        return 0.0
+
+    # Compute quality score from recent or projected stats
     if not stats or stats.get('ip', 0) < 5:
         try:
             proj = player.stats.get('projected', {}) or {}
             era = float(proj.get('ERA', 4.5) or 4.5)
             k = float(proj.get('K', 0) or 0)
-            return max(0, (6 - era) * 3 + k * 0.1) if has_game_today else 0.0
+            quality = max(0, (6 - era) * 3 + k * 0.1)
         except Exception:
-            return 2.0 if has_game_today else 0.0
+            quality = 2.0
+    else:
+        era = stats.get('era', 4.5)
+        whip = stats.get('whip', 1.35)
+        k = stats.get('k', 0)
+        wins = stats.get('wins', 0)
+        qs = stats.get('qs', 0)
+        quality = max(0, (6 - era) * 3) + max(0, (1.5 - whip) * 5) + (k * 0.2) + (qs * 3) + (wins * 1.5)
 
-    era = stats.get('era', 4.5)
-    whip = stats.get('whip', 1.35)
-    k = stats.get('k', 0)
-    wins = stats.get('wins', 0)
-
-    score = max(0, (6 - era) * 3) + max(0, (1.5 - whip) * 5) + (k * 0.2) + (wins * 2)
-    return score if has_game_today else 0.0
+    if is_confirmed_starter:
+        return quality          # Full score — pitching today
+    else:
+        return quality * 0.15  # Team has game but not confirmed starter; prefer confirmed arms
 
 
 def get_eligible_positions(player) -> List[str]:
@@ -154,6 +177,7 @@ def optimize_lineup(
     mlb_team_map: Dict,
     recent_hitting: Dict,
     recent_pitching: Dict,
+    confirmed_starters: set = None,
 ) -> Dict:
     """
     Build the optimal lineup for today.
@@ -167,6 +191,7 @@ def optimize_lineup(
             'notes': [str]
         }
     """
+    confirmed_starters = confirmed_starters or set()
     notes = []
     injured = []
     no_game = []
@@ -185,7 +210,9 @@ def optimize_lineup(
         is_pitcher = 'SP' in str(position) or 'RP' in str(position)
 
         if is_pitcher:
-            score = score_pitcher(player, recent_pitching, has_game)
+            is_confirmed = player.name.lower() in confirmed_starters
+            score = score_pitcher(player, recent_pitching, has_game,
+                                  is_confirmed_starter=is_confirmed)
             available_pitchers.append((player, score, has_game))
         else:
             if not has_game:
@@ -202,7 +229,7 @@ def optimize_lineup(
     used_players = set()
 
     # Fill hitting slots in order of specificity (most specific first)
-    hitting_slots = ['C', '1B', '2B', '3B', 'SS', 'OF', 'UTIL']
+    hitting_slots = ['C', '1B', '2B', '3B', 'SS', 'OF', 'OF2', 'OF3', 'UTIL']
 
     for slot in hitting_slots:
         eligible_positions = LINEUP_SLOTS[slot]
@@ -225,8 +252,8 @@ def optimize_lineup(
             starters[slot] = None
             notes.append(f"⚠️  No eligible player for {slot}")
 
-    # Fill pitching slots
-    pit_slots_order = ['SP', 'RP', 'P']
+    # Fill pitching slots (7 P slots — no SP/RP distinction in this league)
+    pit_slots_order = ['P', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
     for slot in pit_slots_order:
         eligible_positions = LINEUP_SLOTS[slot]
         best_player = None

@@ -34,8 +34,10 @@ from espn_agent.agent import (
     build_category_standings_summary,
     build_other_teams_summary,
     build_free_agents_summary,
+    build_il_alert,
 )
 from espn_agent.deliver import deliver
+from espn_agent.stats_client import get_games_this_week
 
 
 def run(dry_run=False, include_trades=False, include_waivers=False, send_email=True):
@@ -57,13 +59,15 @@ def run(dry_run=False, include_trades=False, include_waivers=False, send_email=T
     # 2. Fetch today's MLB schedule
     print("\n[2/5] Fetching today's MLB schedule...")
     try:
-        teams_playing = get_todays_schedule()
+        teams_playing, confirmed_starters = get_todays_schedule()
         mlb_team_map = get_mlb_team_map()
-        print(f"  ✓ {len(teams_playing)} teams playing today")
+        print(f"  ✓ {len(teams_playing)} teams playing today  ·  "
+              f"{len(confirmed_starters)} confirmed SP starters")
     except Exception as e:
         print(f"  ⚠️  Could not fetch schedule: {e}")
         teams_playing = {}
         mlb_team_map = {}
+        confirmed_starters = set()
 
     # 3. Fetch recent player stats
     print("\n[3/5] Fetching recent player stats (last 14 days)...")
@@ -87,6 +91,7 @@ def run(dry_run=False, include_trades=False, include_waivers=False, send_email=T
         mlb_team_map=mlb_team_map,
         recent_hitting=recent_hitting,
         recent_pitching=recent_pitching,
+        confirmed_starters=confirmed_starters,
     )
 
     lineup_text = format_lineup_for_ai(lineup_result, matchup)
@@ -136,6 +141,54 @@ def run(dry_run=False, include_trades=False, include_waivers=False, send_email=T
         except Exception:
             pass
 
+    # Set lineup + run waiver check before delivering so results appear in the email
+    roster_moves = ''
+    il_alerts = ''
+    roster_entries = []
+
+    if not dry_run:
+        print("\n[5a] Setting lineup on ESPN...")
+        try:
+            from espn_agent.lineup_setter import set_lineup, get_team_id, fetch_league_data
+            team_id = get_team_id()
+            roster_entries, scoring_period = fetch_league_data(team_id)
+            set_lineup(lineup_result['starters'])
+            print("  ✓ Lineup set on ESPN")
+        except ImportError:
+            print("  ⚠️  Lineup setter not yet built (run with --dry-run to skip)")
+        except Exception as e:
+            print(f"  ✗ Failed to set lineup: {e}")
+
+        print("\n[5b] Running waiver check...")
+        try:
+            from espn_agent.roster_manager import run_waiver_check
+            games_this_week = get_games_this_week()
+            roster_moves = run_waiver_check(
+                espn_client=espn,
+                recent_hitting=recent_hitting,
+                recent_pitching=recent_pitching,
+                confirmed_starters=confirmed_starters,
+                games_this_week=games_this_week,
+                dry_run=False,
+            )
+        except Exception as e:
+            print(f"  ⚠️  Waiver check failed: {e}")
+            roster_moves = f"Waiver check error: {e}"
+    else:
+        print("\n(Dry run - lineup not set on ESPN, waiver check skipped)")
+
+    # IL alerts — works in both dry-run and live mode (read-only)
+    try:
+        if not roster_entries:
+            from espn_agent.lineup_setter import get_team_id, fetch_league_data
+            team_id = get_team_id()
+            roster_entries, _ = fetch_league_data(team_id)
+        il_alerts = build_il_alert(roster, roster_entries)
+        if il_alerts:
+            print(f"\n{il_alerts}")
+    except Exception as e:
+        print(f"  ⚠️  IL alert check failed: {e}")
+
     # Deliver digest
     print("\n[5/5] Delivering briefing...")
     deliver(
@@ -144,23 +197,11 @@ def run(dry_run=False, include_trades=False, include_waivers=False, send_email=T
         lineup_analysis=lineup_analysis,
         trade_analysis=trade_analysis,
         waiver_analysis=waiver_analysis,
+        roster_moves=roster_moves,
+        il_alerts=il_alerts,
         matchup_score=matchup_score,
         send_email=send_email,
     )
-
-    # Set lineup on ESPN (unless dry run)
-    if not dry_run:
-        print("\nSetting lineup on ESPN...")
-        try:
-            from espn_agent.lineup_setter import set_lineup
-            set_lineup(lineup_result['starters'])
-            print("  ✓ Lineup set on ESPN")
-        except ImportError:
-            print("  ⚠️  Lineup setter not yet built (run with --dry-run to skip)")
-        except Exception as e:
-            print(f"  ✗ Failed to set lineup: {e}")
-    else:
-        print("\n(Dry run - lineup not set on ESPN)")
 
 
 def test_connection():

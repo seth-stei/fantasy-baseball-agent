@@ -132,15 +132,18 @@ def fetch_fangraphs_batting() -> Dict[str, dict]:
             name = str(row.get('Name', '')).strip()
             if not name:
                 continue
+            hr      = int(row.get('HR', 0) or 0)
+            doubles = int(row.get('2B', 0) or 0)
+            triples = int(row.get('3B', 0) or 0)
             stats[name.lower()] = {
                 'name': name,
                 'avg': float(row.get('AVG', 0) or 0),
-                'hr': int(row.get('HR', 0) or 0),
+                'hr': hr,
                 'rbi': int(row.get('RBI', 0) or 0),
                 'r': int(row.get('R', 0) or 0),
                 'sb': int(row.get('SB', 0) or 0),
                 'pa': int(row.get('PA', 0) or 0),
-                'ops': float(row.get('OPS', 0) or 0),
+                'xbh': doubles + triples + hr,  # extra base hits (actual league category)
             }
         print(f"  Got {len(stats)} hitters from Fangraphs")
         return stats
@@ -164,10 +167,15 @@ def fetch_fangraphs_pitching() -> Dict[str, dict]:
             name = str(row.get('Name', '')).strip()
             if not name:
                 continue
-            gs = int(row.get('GS', 0) or 0)
-            sv = int(row.get('SV', 0) or 0)
-            ip = float(row.get('IP', 0) or 0)
-            era = float(row.get('ERA', 99) or 99)
+            gs   = int(row.get('GS', 0) or 0)
+            sv   = int(row.get('SV', 0) or 0)
+            holds = int(row.get('HLD', 0) or row.get('HD', 0) or 0)
+            era  = float(row.get('ERA', 99) or 99)
+            # Fangraphs pitching_stats has no QS column — compute from GS + ERA.
+            # QS rate: ~80% for sub-3 ERA, ~65% at 3.5, ~50% at 4.5, min 15%.
+            qs_rate = max(0.15, min(0.80, 0.80 - max(0.0, era - 3.0) * 0.10))
+            qs   = int(gs * qs_rate) if gs >= 5 else 0
+            ip   = float(row.get('IP', 0) or 0)
             whip = float(row.get('WHIP', 99) or 99)
             # Fangraphs uses 'SO' for strikeouts in pitching
             k = int(row.get('SO', 0) or row.get('K', 0) or 0)
@@ -179,6 +187,9 @@ def fetch_fangraphs_pitching() -> Dict[str, dict]:
                 'k': k,
                 'w': w,
                 'sv': sv,
+                'holds': holds,
+                'qs': qs,
+                'svhd': sv + holds,  # actual league scoring category
                 'ip': ip,
                 'gs': gs,
                 'is_closer': sv >= 15,
@@ -189,6 +200,43 @@ def fetch_fangraphs_pitching() -> Dict[str, dict]:
     except Exception as e:
         print(f"  Warning: Fangraphs pitching unavailable ({e}), using fallback")
         return {}
+
+
+def fetch_adp_from_fantasypros(force_refresh: bool = False) -> bool:
+    """
+    Auto-download 2026 H2H consensus rankings from FantasyPros and save to data/adp.csv.
+    Returns True if successful.
+    Only re-fetches if the file is missing or force_refresh=True.
+    """
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(base, 'data', 'adp.csv')
+    if os.path.exists(path) and not force_refresh:
+        return True  # Already have it
+
+    print("  Fetching 2026 consensus rankings from FantasyPros...")
+    url = ('https://partners.fantasypros.com/api/v1/consensus-rankings.php'
+           '?sport=MLB&year=2026&week=0&position=ALL&type=RK&scoring=H2H')
+    try:
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+        resp.raise_for_status()
+        players = resp.json().get('players', [])
+        if not players:
+            return False
+        os.makedirs(os.path.join(base, 'data'), exist_ok=True)
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['Name', 'ADP', 'Position'])
+            writer.writeheader()
+            for p in players:
+                writer.writerow({
+                    'Name': p.get('player_name', ''),
+                    'ADP': p.get('rank_ecr', 999),
+                    'Position': p.get('primary_position', ''),
+                })
+        print(f"  Saved {len(players)} players to data/adp.csv")
+        return True
+    except Exception as e:
+        print(f"  Warning: could not fetch FantasyPros ADP: {e}")
+        return False
 
 
 def load_adp_csv() -> Dict[str, float]:
@@ -218,27 +266,64 @@ def load_adp_csv() -> Dict[str, float]:
     return adp_map
 
 
+def _regress(val: float, mean: float, pct: float = 0.35) -> float:
+    """Pull an extreme value pct% toward a sustainable mean (scoring only, not display)."""
+    return val + (mean - val) * pct
+
+
 def compute_hitter_score(stats: dict) -> float:
-    """Composite fantasy score for hitters (H2H: AVG, R, HR, RBI, SB)."""
-    hr_score  = min(stats.get('hr', 0)  / 45.0, 1.0) * 25
-    rbi_score = min(stats.get('rbi', 0) / 120.0, 1.0) * 20
-    r_score   = min(stats.get('r', 0)   / 120.0, 1.0) * 20
-    sb_score  = min(stats.get('sb', 0)  / 50.0, 1.0) * 15
+    """
+    Composite fantasy score for hitters (H2H: AVG, R, HR, XBH, RBI, SB).
+    Applies regression toward mean for outlier 2025 seasons so extreme single-year
+    performances don't dominate rankings vs. the real draft market.
+    """
+    # Regress extreme raw stats toward realistic season-long expectations
+    hr  = stats.get('hr', 0)
+    if hr > 45:
+        hr = 45 + (hr - 45) * 0.5   # 60 HR → 52, 50 HR → 47
+    rbi = min(stats.get('rbi', 0), 125)
+    r   = min(stats.get('r', 0),   120)
+    sb  = min(stats.get('sb', 0),  60)
+    xbh = stats.get('xbh', 0) or int(stats.get('hr', 0) * 1.6)
+    xbh = min(xbh, 85)
     avg = stats.get('avg', .250)
-    avg_score = max(0.0, (avg - .220) / (.360 - .220)) * 20
-    return hr_score + rbi_score + r_score + sb_score + avg_score
+    if avg > .320:
+        avg = _regress(avg, .320, 0.40)  # .360 → .336
+
+    hr_score  = min(hr  / 45.0, 1.0) * 20
+    rbi_score = min(rbi / 120.0, 1.0) * 18
+    r_score   = min(r   / 115.0, 1.0) * 15
+    sb_score  = min(sb  / 50.0,  1.0) * 15
+    xbh_score = min(xbh / 70.0,  1.0) * 12
+    avg_score = max(0.0, (avg - .220) / (.330 - .220)) * 20
+    return hr_score + rbi_score + r_score + sb_score + xbh_score + avg_score
 
 
 def compute_pitcher_score(stats: dict) -> float:
-    """Composite fantasy score for pitchers (H2H: ERA, WHIP, K, W, SV)."""
-    k_score   = min(stats.get('k', 0)    / 250.0, 1.0) * 25
-    w_score   = min(stats.get('w', 0)    / 20.0,  1.0) * 20
-    sv_score  = min(stats.get('sv', 0)   / 40.0,  1.0) * 15
+    """
+    Composite fantasy score for pitchers (H2H: ERA, WHIP, K, W, QS, SVHD).
+    Applies regression toward mean for outlier ERA/WHIP seasons — a pitcher
+    who posted 1.73 ERA in 2025 will not repeat that; treat it as ~2.20 for ranking.
+    """
+    k_score  = min(stats.get('k', 0)  / 250.0, 1.0) * 22
+    w_score  = min(stats.get('w', 0)  / 20.0,  1.0) * 15
+    qs_score = min(stats.get('qs', 0) / 25.0,  1.0) * 15
+    svhd = stats.get('svhd', 0) or stats.get('sv', 0) or 0
+    svhd_score = min(svhd / 45.0, 1.0) * 13
+
+    # Regress extreme ERA toward a sustainable floor (2.80 for scoring purposes)
     era = stats.get('era', 4.50)
-    era_score  = max(0.0, (5.50 - era)  / (5.50 - 2.00)) * 20
+    if era < 2.80:
+        era = _regress(era, 2.80, 0.40)   # 1.73 → 2.16, 2.21 → 2.45
+    era_score = max(0.0, (5.50 - era) / (5.50 - 2.00)) * 18
+
+    # Regress extreme WHIP similarly
     whip = stats.get('whip', 1.30)
-    whip_score = max(0.0, (1.80 - whip) / (1.80 - 0.80)) * 20
-    return k_score + w_score + sv_score + era_score + whip_score
+    if whip < 0.90:
+        whip = _regress(whip, 0.90, 0.35)  # 0.70 → 0.77
+    whip_score = max(0.0, (1.80 - whip) / (1.80 - 0.80)) * 17
+
+    return k_score + w_score + qs_score + svhd_score + era_score + whip_score
 
 
 # Fallback player pool — used when Fangraphs is unavailable (e.g. --mock mode)
@@ -356,21 +441,27 @@ def _build_pool_from_fallback() -> Dict[str, dict]:
         is_pitcher = era is not None
         is_closer = (sv or 0) >= 15
 
+        # Compute proxy values for actual league categories not in the fallback tuple
+        proj_xbh   = int((hr or 0) * 1.6) if not is_pitcher else None
+        # QS proxy: ~75% of wins come from quality starts for SPs (not closers)
+        proj_qs    = int((w or 0) * 0.75) if is_pitcher and not is_closer else None
+        proj_holds = 0  # simplified; real holds data only comes from Fangraphs
+
         pool[lname] = {
             'name': name,
             'positions': positions,
             'adp': adp,
             'fantasy_score': compute_pitcher_score({
-                'k': k or 0, 'w': w or 0, 'sv': sv or 0,
+                'k': k or 0, 'w': w or 0, 'sv': sv or 0, 'qs': proj_qs or 0,
                 'era': era or 4.5, 'whip': whip or 1.3
             }) if is_pitcher else compute_hitter_score({
                 'hr': hr or 0, 'rbi': rbi or 0, 'r': r or 0,
-                'sb': sb or 0, 'avg': avg or .250
+                'sb': sb or 0, 'avg': avg or .250, 'xbh': proj_xbh or 0
             }),
             'proj_avg': avg, 'proj_hr': hr, 'proj_rbi': rbi,
-            'proj_r': r, 'proj_sb': sb,
+            'proj_r': r, 'proj_sb': sb, 'proj_xbh': proj_xbh,
             'proj_era': era, 'proj_whip': whip, 'proj_k': k,
-            'proj_w': w, 'proj_sv': sv,
+            'proj_w': w, 'proj_sv': sv, 'proj_holds': proj_holds, 'proj_qs': proj_qs,
             'is_pitcher': is_pitcher,
             'is_closer': is_closer,
             'drafted_by': None,
@@ -390,6 +481,9 @@ def build_player_pool() -> Dict[str, dict]:
     Returns dict: lower_player_name -> player_dict
     """
     print("\nLoading draft data (this takes ~30 seconds)...")
+
+    # Auto-fetch FantasyPros ADP if data/adp.csv is missing
+    fetch_adp_from_fantasypros()
 
     espn_id_map, espn_name_map = fetch_espn_player_map()
     fielding_positions = fetch_fielding_positions()   # name -> [pos] from Fangraphs
@@ -438,10 +532,11 @@ def build_player_pool() -> Dict[str, dict]:
                 'adp': adp,
                 'fantasy_score': score,
                 'proj_avg': None, 'proj_hr': None, 'proj_rbi': None,
-                'proj_r': None, 'proj_sb': None,
+                'proj_r': None, 'proj_sb': None, 'proj_xbh': None,
                 'proj_era': stats.get('era'), 'proj_whip': stats.get('whip'),
                 'proj_k': stats.get('k'), 'proj_w': stats.get('w'),
-                'proj_sv': stats.get('sv'),
+                'proj_sv': stats.get('sv'), 'proj_holds': stats.get('holds'),
+                'proj_qs': stats.get('qs'),
                 'is_pitcher': True, 'is_closer': stats.get('is_closer', False),
                 'drafted_by': None, 'pick_number': None, 'round': None,
             }
@@ -449,7 +544,11 @@ def build_player_pool() -> Dict[str, dict]:
             # Position priority: ESPN (most accurate) → Fangraphs fielding → UTIL
             espn_pid = espn_name_map.get(lname)
             espn_pos = espn_id_map.get(espn_pid, {}).get('positions') if espn_pid else None
-            positions = espn_pos or fielding_positions.get(lname) or ['UTIL']
+            # Strip any pitcher slots from hitters (some players have pitching
+            # appearances in Fangraphs fielding data which leaks SP/RP eligibility)
+            if espn_pos:
+                espn_pos = [p for p in espn_pos if p not in ('SP', 'RP')]
+            positions = espn_pos or [p for p in (fielding_positions.get(lname) or []) if p not in ('SP', 'RP')] or ['UTIL']
             adp = adp_override.get(lname, float(unified_rank))
             pool[lname] = {
                 'name': stats['name'],
@@ -458,9 +557,9 @@ def build_player_pool() -> Dict[str, dict]:
                 'fantasy_score': score,
                 'proj_avg': stats.get('avg'), 'proj_hr': stats.get('hr'),
                 'proj_rbi': stats.get('rbi'), 'proj_r': stats.get('r'),
-                'proj_sb': stats.get('sb'),
+                'proj_sb': stats.get('sb'), 'proj_xbh': stats.get('xbh'),
                 'proj_era': None, 'proj_whip': None, 'proj_k': None,
-                'proj_w': None, 'proj_sv': None,
+                'proj_w': None, 'proj_sv': None, 'proj_holds': None, 'proj_qs': None,
                 'is_pitcher': False, 'is_closer': False,
                 'drafted_by': None, 'pick_number': None, 'round': None,
             }
@@ -504,8 +603,10 @@ def mark_drafted(pool: Dict[str, dict], player_name: str,
     # Unknown player — add to pool as drafted
     pool[lname] = {
         'name': player_name, 'positions': ['UTIL'], 'adp': 999, 'fantasy_score': 0,
-        'proj_avg': None, 'proj_hr': None, 'proj_rbi': None, 'proj_r': None, 'proj_sb': None,
-        'proj_era': None, 'proj_whip': None, 'proj_k': None, 'proj_w': None, 'proj_sv': None,
+        'proj_avg': None, 'proj_hr': None, 'proj_rbi': None, 'proj_r': None,
+        'proj_sb': None, 'proj_xbh': None,
+        'proj_era': None, 'proj_whip': None, 'proj_k': None, 'proj_w': None,
+        'proj_sv': None, 'proj_holds': None, 'proj_qs': None,
         'is_pitcher': False, 'is_closer': False,
         'drafted_by': team_name, 'pick_number': pick_number, 'round': round_num,
     }
