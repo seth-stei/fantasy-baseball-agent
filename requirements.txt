@@ -1,0 +1,6 @@
+espn-api
+pybaseball
+requests
+anthropic
+playwright
+python-dotenv
