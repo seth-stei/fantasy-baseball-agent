@@ -237,8 +237,9 @@ class DraftTracker:
             resp = requests.get(url, params=params, cookies=cookies, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            # Just confirm we got a valid response shape
-            return 'draftDetail' in data
+            # Accept any valid JSON response — draftDetail may be absent before
+            # pick 1, but will appear once the real draft starts.
+            return isinstance(data, dict)
         except Exception:
             return False
 
