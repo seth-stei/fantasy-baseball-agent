@@ -261,6 +261,18 @@ def run_draft(tracker: DraftTracker, player_pool: dict,
                 display = format_my_turn_display(top, my_roster, round_num,
                                                  pick_num, total_picks, MY_TEAM_NAME)
                 print(display)
+            else:
+                # Bare name — treat as opponent pick (same as "p: Name")
+                name = raw
+                pick_num = tracker.current_pick_number()
+                round_num = tracker.current_round()
+                is_mine = pick_num in tracker.my_pick_numbers
+                pick = tracker.log_manual_pick(name, MY_TEAM_NAME if is_mine else 'Opponent')
+                print_pick(pick)
+                key = mark_drafted(player_pool, name,
+                                   pick['team_name'], pick_num, round_num)
+                if is_mine and key and key in player_pool:
+                    my_roster.append(player_pool[key])
             continue
 
         # ── Auto mode: check for new picks from background thread ─────────────
@@ -358,6 +370,8 @@ def main():
                         help=f'Number of draft rounds (default: {NUM_ROUNDS})')
     parser.add_argument('--teams', type=int, default=None,
                         help='Number of teams (auto-detected from ESPN if not set)')
+    parser.add_argument('--pos', type=int, default=None,
+                        help='Your draft position 1-10 (skips interactive prompt)')
     args = parser.parse_args()
 
     print("\n" + "═" * 52)
@@ -369,7 +383,7 @@ def main():
 
     if args.mock:
         # Mock mode: no ESPN connection needed
-        draft_pos = prompt_draft_position(args.teams or 10)
+        draft_pos = args.pos if args.pos else prompt_draft_position(args.teams or 10)
         run_mock_draft(player_pool, draft_pos,
                        num_teams=args.teams or 10,
                        num_rounds=min(args.rounds, 6))
@@ -388,7 +402,7 @@ def main():
         num_teams = args.teams or 10
 
     # ── Draft position setup ───────────────────────────────────────────────────
-    draft_pos = prompt_draft_position(num_teams)
+    draft_pos = args.pos if args.pos else prompt_draft_position(num_teams)
     my_picks = get_snake_pick_numbers(draft_pos, num_teams, args.rounds)
     total_picks = num_teams * args.rounds
 
