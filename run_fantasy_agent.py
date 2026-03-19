@@ -152,8 +152,11 @@ def run(dry_run=False, include_trades=False, include_waivers=False, send_email=T
             from espn_agent.lineup_setter import set_lineup, get_team_id, fetch_league_data
             team_id = get_team_id()
             roster_entries, scoring_period = fetch_league_data(team_id)
-            set_lineup(lineup_result['starters'])
-            print("  ✓ Lineup set on ESPN")
+            success = set_lineup(lineup_result['starters'])
+            if success:
+                print("  ✓ Lineup set on ESPN")
+            else:
+                print("  ✗ Lineup set failed (ESPN rejected the request)")
         except ImportError:
             print("  ⚠️  Lineup setter not yet built (run with --dry-run to skip)")
         except Exception as e:

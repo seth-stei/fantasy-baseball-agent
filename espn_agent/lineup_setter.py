@@ -33,7 +33,8 @@ ESPN_S2      = os.getenv('ESPN_S2', '')
 ESPN_SWID    = os.getenv('ESPN_SWID', '')
 MY_TEAM_NAME = os.getenv('ESPN_TEAM_NAME', '')
 
-ESPN_API_BASE = "https://fantasy.espn.com/apis/v3/games/flb"
+ESPN_API_BASE_READ  = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb"
+ESPN_API_BASE_WRITE = "https://lm-api-writes.fantasy.espn.com/apis/v3/games/flb"
 
 # ── Slot ID tables ─────────────────────────────────────────────────────────────
 # ESPN Baseball (FLB) lineup slot IDs for Sandy Koufax's league:
@@ -47,52 +48,39 @@ ESPN_API_BASE = "https://fantasy.espn.com/apis/v3/games/flb"
 # update these values if needed.
 SLOT_ID_TO_NAME = {
     0:  'C',
-    2:  '1B',
-    4:  '2B',
-    5:  '3B',
-    6:  'SS',
-    7:  'OF',
-    8:  'OF',
-    9:  'OF',
-    11: 'UTIL',
+    1:  '1B',
+    2:  '2B',
+    3:  '3B',
+    4:  'SS',
+    5:  'OF',
     12: 'UTIL',
     13: 'P',
-    14: 'P',
-    15: 'P',
-    16: 'P',
-    17: 'P',
-    18: 'P',
-    19: 'P',
-    20: 'BE',
-    21: 'BE',
-    22: 'IL',
-    23: 'IL',
+    16: 'BE',
+    17: 'IL',
 }
 
-BENCH_SLOT_ID  = 20
-BENCH_SLOT_IDS = {20, 21}
-IL_SLOT_IDS    = {22, 23}
+BENCH_SLOT_ID  = 16
+BENCH_SLOT_IDS = {16}
+IL_SLOT_IDS    = {17}
 
-# Map optimizer slot name → ESPN target slot ID
-# Hitting slots are well-established (confirmed by ESPN API).
-# P slot IDs: best guess for 7P league — verify after first post-draft connection.
+# Map optimizer slot name → ESPN target slot ID (confirmed from live API)
 OPTIMIZER_TO_ESPN: Dict[str, int] = {
     'C':    0,
-    '1B':   2,
-    '2B':   4,
-    '3B':   5,
-    'SS':   6,
-    'OF':   7,
-    'OF2':  8,
-    'OF3':  9,
+    '1B':   1,
+    '2B':   2,
+    '3B':   3,
+    'SS':   4,
+    'OF':   5,
+    'OF2':  5,
+    'OF3':  5,
     'UTIL': 12,
     'P':    13,
-    'P2':   14,
-    'P3':   15,
-    'P4':   16,
-    'P5':   17,
-    'P6':   18,
-    'P7':   19,
+    'P2':   13,
+    'P3':   13,
+    'P4':   13,
+    'P5':   13,
+    'P6':   13,
+    'P7':   13,
 }
 
 
@@ -121,7 +109,7 @@ def fetch_league_data(team_id: int) -> Tuple[List[dict], int]:
         roster_entries: list of {player_id, name, current_slot_id}
         scoring_period_id: int (day of the season — used in the POST body)
     """
-    url     = f"{ESPN_API_BASE}/seasons/{YEAR}/segments/0/leagues/{LEAGUE_ID}"
+    url     = f"{ESPN_API_BASE_READ}/seasons/{YEAR}/segments/0/leagues/{LEAGUE_ID}"
     params  = {'view': 'mRoster'}
     cookies = {'espn_s2': ESPN_S2, 'SWID': ESPN_SWID}
     headers = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
@@ -218,7 +206,7 @@ def post_lineup(moves: list, team_id: int, scoring_period: int) -> bool:
         print("  No changes needed — lineup is already optimal.")
         return True
 
-    url     = f"{ESPN_API_BASE}/seasons/{YEAR}/segments/0/leagues/{LEAGUE_ID}/transactions/"
+    url     = f"{ESPN_API_BASE_WRITE}/seasons/{YEAR}/segments/0/leagues/{LEAGUE_ID}/transactions/"
     cookies = {'espn_s2': ESPN_S2, 'SWID': ESPN_SWID}
     headers = {
         'Accept':       'application/json',

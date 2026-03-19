@@ -37,7 +37,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 from espn_agent.lineup_setter import (
     LEAGUE_ID, YEAR, ESPN_S2, ESPN_SWID,
-    ESPN_API_BASE, BENCH_SLOT_ID, IL_SLOT_IDS,
+    ESPN_API_BASE_WRITE as ESPN_API_BASE, BENCH_SLOT_ID, IL_SLOT_IDS,
 )
 
 # ── Drop-protection thresholds ────────────────────────────────────────────────
@@ -61,6 +61,40 @@ MIN_GAMES_FOR_COLD_HITTER = 7    # need at least 7 games before labeling cold
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+# Slot counts in the active lineup (excluding bench/IL)
+_LINEUP_SLOT_COUNTS = {'C': 1, '1B': 1, '2B': 1, '3B': 1, 'SS': 1, 'OF': 3, 'SP': 4, 'RP': 3}
+
+
+def _roster_position_group(player) -> str:
+    """Map a player to their primary position group for slot-count analysis."""
+    slots = getattr(player, 'eligibleSlots', None) or [getattr(player, 'position', '')]
+    for p in ('C', '1B', '2B', '3B', 'SS'):
+        if p in slots:
+            return p
+    if any(p in slots for p in ('LF', 'CF', 'RF', 'OF')):
+        return 'OF'
+    if 'SP' in slots:
+        return 'SP'
+    if 'RP' in slots or 'P' in slots:
+        return 'RP'
+    return 'UTIL'
+
+
+def _roster_needs(roster: List) -> Dict[str, int]:
+    """
+    Returns {position_group: surplus} relative to active lineup slot counts.
+    Positive = surplus (more players than slots), negative = deficit.
+    """
+    counts: Dict[str, int] = {}
+    for p in roster:
+        grp = _roster_position_group(p)
+        counts[grp] = counts.get(grp, 0) + 1
+    needs = {}
+    for pos, slots in _LINEUP_SLOT_COUNTS.items():
+        needs[pos] = counts.get(pos, 0) - slots
+    return needs
+
 
 def _espn_session() -> requests.Session:
     s = requests.Session()
@@ -114,8 +148,8 @@ def _hitter_positions(player) -> List[str]:
 
 
 def _is_pitcher(player) -> bool:
-    pos = str(getattr(player, 'position', ''))
-    return 'SP' in pos or 'RP' in pos
+    slots = getattr(player, 'eligibleSlots', None) or [getattr(player, 'position', '')]
+    return any(p in ('SP', 'RP', 'P') for p in slots)
 
 
 # ── Step 1: identify the best drop candidate ─────────────────────────────────
@@ -162,17 +196,25 @@ def find_best_drop(
             elif not stats:
                 benchable.append(player)
 
-    # Pick worst cold hitter first
+    # Prefer to drop from same category as what we're adding (keeps roster balanced)
+    if add_candidate is not None:
+        adding_pitcher = _is_pitcher(add_candidate)
+        if adding_pitcher and bad_pitchers:
+            bad_pitchers.sort(key=lambda x: x[1], reverse=True)
+            return bad_pitchers[0][0]
+        if not adding_pitcher and cold_hitters:
+            cold_hitters.sort(key=lambda x: x[1])
+            return cold_hitters[0][0]
+
+    # Fallback priority: worst cold hitter, then worst pitcher, then bench filler
     if cold_hitters:
         cold_hitters.sort(key=lambda x: x[1])
         return cold_hitters[0][0]
 
-    # Then worst pitcher
     if bad_pitchers:
         bad_pitchers.sort(key=lambda x: x[1], reverse=True)
         return bad_pitchers[0][0]
 
-    # Last resort: no-stats bench player (likely a never-plays backup)
     if benchable:
         return benchable[0]
 
@@ -224,17 +266,20 @@ def find_injury_replacement(
     return best
 
 
-def find_hot_free_agent(
+def find_hot_free_agents(
     roster: List,
     free_agents: List,
     recent_hitting: Dict,
     recent_pitching: Dict,
-) -> Optional[object]:
+) -> List[Tuple[object, float]]:
     """
-    Find a free agent who is on a hot streak (AVG >= .330 or XBH >= 8 over 14 days;
-    ERA < 2.50 for pitchers).
-    Only returns someone better than whoever we'd have to drop.
+    Return all free agents on a hot streak, ranked by quality score.
+    Hitters: AVG >= .330 or XBH >= 8 over 14 days.
+    Pitchers: ERA < 2.50 with >= 5 IP.
+
+    Returns sorted list of (player, score) tuples, best first.
     """
+    candidates = []
     for fa in free_agents:
         name_lower = fa.name.lower()
         if _is_pitcher(fa):
@@ -242,15 +287,19 @@ def find_hot_free_agent(
             ip = stats.get('ip', 0)
             era = stats.get('era', 9.9)
             if ip >= 5 and era < HOT_PITCHER_ERA:
-                return fa
+                score = max(0, (4 - era) * 3) + stats.get('k', 0) * 0.2 + stats.get('svhd', 0) * 2
+                candidates.append((fa, score))
         else:
             stats = recent_hitting.get(name_lower, {})
             avg = stats.get('avg', 0)
             xbh = stats.get('xbh', 0)
             games = stats.get('games', 0)
             if games >= 7 and (avg >= HOT_HITTER_AVG or xbh >= HOT_HITTER_XBH):
-                return fa
-    return None
+                score = (avg * 50) + (xbh * 4) + stats.get('hr', 0) * 3 + stats.get('sb', 0) * 3
+                candidates.append((fa, score))
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return candidates
 
 
 def find_two_start_sp(
@@ -386,19 +435,63 @@ def run_waiver_check(
         print("  No free agents available.")
         return "Waiver check: no free agents available."
 
+    # Positional needs — used to deprioritize adds at oversupplied positions
+    needs = _roster_needs(roster)
+
     # Determine the best add candidate (priority order)
     add_candidate = None
     add_reason = ''
 
-    # 1. Injury replacement (highest priority)
+    # 1. Injury replacement (highest priority — ignores positional surplus)
     add_candidate = find_injury_replacement(roster, free_agents, recent_hitting, recent_pitching)
     if add_candidate:
-        add_reason = f"injury replacement for an injured rostered player"
+        add_reason = "injury replacement for an injured rostered player"
 
-    # 2. Hot free agent
+    # 2. Hot free agents — rank all, apply positional filter, optionally ask Claude
     if not add_candidate:
-        add_candidate = find_hot_free_agent(roster, free_agents, recent_hitting, recent_pitching)
-        if add_candidate:
+        hot_candidates = find_hot_free_agents(roster, free_agents, recent_hitting, recent_pitching)
+
+        # Soft positional filter: skip adds at positions with surplus >= 3
+        filtered = [
+            (fa, score) for fa, score in hot_candidates
+            if needs.get(_roster_position_group(fa), 0) < 3
+        ]
+        if not filtered:
+            filtered = hot_candidates  # fall back to unfiltered if all filtered out
+
+        if len(filtered) >= 2:
+            # Ask Claude to rank the top candidates
+            try:
+                from espn_agent.agent import rank_waiver_candidates, build_roster_summary
+                candidate_summaries = []
+                for fa, score in filtered[:5]:
+                    name_lower = fa.name.lower()
+                    if _is_pitcher(fa):
+                        s = recent_pitching.get(name_lower, {})
+                        desc = (f"{fa.name} (ERA {s.get('era', '?'):.2f}, "
+                                f"K {s.get('k', 0)}, SVHD {s.get('svhd', 0)}, "
+                                f"IP {s.get('ip', 0):.1f})")
+                    else:
+                        s = recent_hitting.get(name_lower, {})
+                        desc = (f"{fa.name} (AVG {s.get('avg', 0):.3f}, "
+                                f"XBH {s.get('xbh', 0)}, HR {s.get('hr', 0)}, "
+                                f"SB {s.get('sb', 0)})")
+                    candidate_summaries.append(desc)
+
+                claude_pick = rank_waiver_candidates(candidate_summaries, build_roster_summary(roster))
+                # Match Claude's pick to our candidate list
+                matched = next(
+                    (fa for fa, _ in filtered[:5] if fa.name.lower() in claude_pick.lower()),
+                    None
+                )
+                add_candidate = matched or filtered[0][0]
+                add_reason = f"hot streak — Claude selected (AVG ≥ .330 or XBH ≥ 8 / ERA < 2.50)"
+            except Exception as e:
+                print(f"  ⚠️  Claude ranking failed ({e}), using top-scored FA")
+                add_candidate = filtered[0][0]
+                add_reason = "hot streak (AVG ≥ .330 or XBH ≥ 8 over last 14 days; ERA < 2.50 for pitchers)"
+        elif filtered:
+            add_candidate = filtered[0][0]
             add_reason = "hot streak (AVG ≥ .330 or XBH ≥ 8 over last 14 days; ERA < 2.50 for pitchers)"
 
     # 3. Two-start SP (if we have games_this_week data)

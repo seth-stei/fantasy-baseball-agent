@@ -3,9 +3,18 @@
 MLB Stats client - fetches today's schedule, injuries, and player stats.
 Uses the free MLB Stats API (statsapi.mlb.com).
 """
+import re
 import requests
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Set
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, strip name suffixes (Jr., Sr., II, III, IV), collapse whitespace."""
+    name = name.lower().strip()
+    name = re.sub(r'\b(jr\.?|sr\.?|ii|iii|iv)\b', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
 
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
@@ -25,6 +34,7 @@ def get_todays_schedule():
         'sportId': 1,
         'date': today,
         'hydrate': 'team,lineups,probablePitcher',
+        'gameType': 'R',  # Regular season only (excludes spring training)
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
@@ -67,9 +77,9 @@ def get_todays_schedule():
                 for side in ('home', 'away'):
                     probable = game['teams'][side].get('probablePitcher', {})
                     if probable:
-                        name = probable.get('fullName', '').strip().lower()
+                        name = probable.get('fullName', '').strip()
                         if name:
-                            confirmed_starters.add(name)
+                            confirmed_starters.add(_normalize_name(name))
 
     return teams_playing, confirmed_starters
 
@@ -141,7 +151,7 @@ def get_recent_hitting_stats(days: int = 14) -> Dict[str, Dict]:
         stat = entry.get('stat', {})
         name = player.get('fullName', '')
         if name:
-            stats_map[name.lower()] = {
+            stats_map[_normalize_name(name)] = {
                 'avg': float(stat.get('avg', 0) or 0),
                 'hr': int(stat.get('homeRuns', 0) or 0),
                 'rbi': int(stat.get('rbi', 0) or 0),

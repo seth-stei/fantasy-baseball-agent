@@ -253,3 +253,27 @@ def build_free_agents_summary(free_agents, limit: int = 20) -> str:
         ownership = getattr(player, 'percent_owned', 0) or 0
         lines.append(f"  {player.name} ({pos}) - {ownership:.0f}% owned")
     return '\n'.join(lines) if lines else "No free agents available"
+
+
+def rank_waiver_candidates(candidates: List[str], roster_summary: str) -> str:
+    """
+    Ask Claude to pick the single best waiver add from a list of pre-filtered candidates.
+    Returns the player's full name (or empty string on failure).
+
+    Called by roster_manager when >= 2 hot FAs qualify, so Claude breaks the tie.
+    """
+    prompt = f"""You are an expert fantasy baseball analyst.
+
+{LEAGUE_CONTEXT}
+
+MY CURRENT ROSTER:
+{roster_summary}
+
+CANDIDATE FREE AGENTS (all are hot over the last 14 days — your job is to pick the best one):
+{chr(10).join(f'  {i+1}. {c}' for i, c in enumerate(candidates))}
+
+Which ONE player should I add to best improve my H2H category standings this week?
+Consider positional need, category balance, and recent performance.
+Reply with ONLY the player's full name, nothing else."""
+
+    return _call_claude(prompt, max_tokens=60).strip()
