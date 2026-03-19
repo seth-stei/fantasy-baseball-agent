@@ -1,0 +1,41 @@
+name: Daily Fantasy Baseball Agent
+
+on:
+  schedule:
+    # 10:00 AM PT = 17:00 UTC (during PDT/summer); adjust to 18:00 UTC during PST/winter
+    # MLB lineups lock ~10 AM PT, so this runs before that.
+    - cron: '0 17 * * *'
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fantasy baseball agent
+        env:
+          ESPN_LEAGUE_ID: ${{ secrets.ESPN_LEAGUE_ID }}
+          ESPN_YEAR: ${{ secrets.ESPN_YEAR }}
+          ESPN_TEAM_NAME: ${{ secrets.ESPN_TEAM_NAME }}
+          ESPN_S2: ${{ secrets.ESPN_S2 }}
+          ESPN_SWID: ${{ secrets.ESPN_SWID }}
+          ESPN_USERNAME: ${{ secrets.ESPN_USERNAME }}
+          ESPN_PASSWORD: ${{ secrets.ESPN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+        run: python3 run_fantasy_agent.py
