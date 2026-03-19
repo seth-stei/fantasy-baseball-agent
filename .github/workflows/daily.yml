@@ -2,9 +2,9 @@ name: Daily Fantasy Baseball Agent
 
 on:
   schedule:
-    # 10:00 AM PT = 17:00 UTC (during PDT/summer); adjust to 18:00 UTC during PST/winter
-    # MLB lineups lock ~10 AM PT, so this runs before that.
-    - cron: '0 17 * * *'
+    # 7:00 AM PT = 14:00 UTC (during PDT/summer)
+    # Runs before the earliest MLB day games (~9:05 AM PT).
+    - cron: '0 14 * * *'
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
 jobs:
