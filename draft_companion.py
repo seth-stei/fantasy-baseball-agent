@@ -432,14 +432,7 @@ def main():
             num_rounds=args.rounds,
             my_team_id=my_team_id,
         )
-        print("\n  Testing ESPN draft API connection...")
-        api_ok = tracker.test_api_connection()
-        if api_ok:
-            print("  ESPN API: connected — picks will be auto-detected!")
-        else:
-            print("  ESPN API: unavailable — switching to manual mode.")
-            print("  Type 'p: Player Name' after each pick is announced on ESPN.")
-            manual_mode = True
+        print("\n  ESPN API: starting in auto-detect mode (polling every 10s)...")
     else:
         tracker = DraftTracker(
             draft_position=draft_pos,
